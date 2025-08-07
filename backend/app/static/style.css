@@ -1,0 +1,358 @@
+/* Estilos Generales */
+body {
+    font-family: Arial, sans-serif;
+    margin: 0;
+    padding: 0;
+    background-color: #f4f7f6;
+    color: #333;
+}
+
+.header {
+    background-color: #2c3e50;
+    color: white;
+    padding: 15px 20px;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.header h1 {
+    margin: 0;
+    font-size: 24px;
+    display: flex;
+    align-items: center;
+}
+
+.header h1 i {
+    margin-right: 10px;
+    color: #3498db;
+}
+
+.main-container {
+    display: flex;
+    height: calc(100vh - 60px); /* Altura total menos el header */
+}
+
+.dashboard {
+    display: flex;
+    width: 100%;
+}
+
+/* Sidebar */
+.sidebar {
+    width: 300px;
+    background-color: #ffffff;
+    box-shadow: 2px 0 5px rgba(0,0,0,0.1);
+    display: flex;
+    flex-direction: column;
+}
+
+.sidebar-tabs {
+    display: flex;
+    flex-direction: column;
+    padding: 10px 0;
+    border-bottom: 1px solid #eee;
+}
+
+.sidebar-tab {
+    padding: 15px 20px;
+    cursor: pointer;
+    transition: background-color 0.3s ease;
+    display: flex;
+    align-items: center;
+    font-weight: bold;
+    color: #555;
+}
+
+.sidebar-tab i {
+    margin-right: 10px;
+    color: #3498db;
+}
+
+.sidebar-tab:hover {
+    background-color: #f0f0f0;
+}
+
+.sidebar-tab.active {
+    background-color: #e2f0fb;
+    color: #3498db;
+    border-left: 5px solid #3498db;
+}
+
+.sidebar-content {
+    flex-grow: 1;
+    padding: 20px;
+    overflow-y: auto;
+}
+
+.tab-content {
+    display: none;
+}
+
+.tab-content.active {
+    display: block;
+}
+
+/* Map Container */
+.map-container {
+    flex-grow: 1;
+    background-color: #e0e0e0;
+    position: relative;
+}
+
+#map {
+    width: 100%;
+    height: 100%;
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+/* Card Styles */
+.device-list, .group-list, .geofence-list {
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+}
+
+.device-card, .group-card, .geofence-card {
+    background-color: #f9f9f9;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.device-card:hover, .group-card:hover, .geofence-card:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+}
+
+.device-header, .group-header, .geofence-header {
+    background-color: #eee;
+    padding: 10px 15px;
+    border-bottom: 1px solid #ddd;
+    display: flex;
+    flex-wrap: wrap; 
+    justify-content: space-between; 
+    align-items: center;
+    gap: 10px; 
+}
+
+.device-header.status-inside-geofence { border-left: 5px solid #28a745; } 
+.device-header.status-outside-geofence { border-left: 5px solid #dc3545; } 
+.device-header.status-unknown-geofence { border-left: 5px solid #ffc107; } 
+
+.device-header h3 i, .group-header h3 i, .geofence-header h3 i {
+    margin-right: 8px;
+    color: #3498db;
+}
+
+.device-details, .group-details, .geofence-details {
+    padding: 15px;
+    font-size: 14px;
+    line-height: 1.6;
+}
+
+.device-details p, .group-details p, .geofence-details p {
+    margin: 5px 0;
+}
+
+/* Buttons */
+.btn {
+    padding: 8px 12px;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 14px;
+    transition: background-color 0.3s ease;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.btn-primary { background-color: #007bff; color: white; }
+.btn-primary:hover { background-color: #0056b3; }
+
+.btn-info { background-color: #17a2b8; color: white; }
+.btn-info:hover { background-color: #138496; }
+
+.btn-success { background-color: #28a745; color: white; }
+.btn-success:hover { background-color: #1e7e34; }
+
+.btn-warning { background-color: #ffc107; color: #333; }
+.btn-warning:hover { background-color: #e0a800; }
+
+.btn-danger { background-color: #dc3545; color: white; }
+.btn-danger:hover { background-color: #c82333; }
+
+.btn-sm {
+    padding: 5px 9px;
+    font-size: 12px;
+}
+
+.device-actions button, .group-actions button, .geofence-actions button {
+    margin-left: 5px;
+}
+
+/* Modals */
+.modal {
+    display: none; 
+    position: fixed; 
+    z-index: 1000; 
+    left: 0;
+    top: 0;
+    width: 100%; 
+    height: 100%; 
+    overflow: auto; 
+    background-color: rgba(0,0,0,0.4); 
+}
+
+.modal-content {
+    background-color: #fefefe;
+    margin: 10% auto; 
+    padding: 20px;
+    border: 1px solid #888;
+    width: 80%; 
+    max-width: 500px;
+    border-radius: 8px;
+    box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+    position: relative;
+}
+
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid #eee;
+    padding-bottom: 10px;
+    margin-bottom: 15px;
+}
+
+.modal-title {
+    margin: 0;
+    font-size: 20px;
+    color: #333;
+}
+
+.close {
+    color: #aaa;
+    font-size: 28px;
+    font-weight: bold;
+    cursor: pointer;
+}
+
+.close:hover,
+.close:focus {
+    color: black;
+    text-decoration: none;
+}
+
+.form-group {
+    margin-bottom: 15px;
+}
+
+.form-label {
+    display: block;
+    margin-bottom: 5px;
+    font-weight: bold;
+}
+
+.form-control {
+    width: calc(100% - 20px);
+    padding: 10px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 16px;
+}
+
+.form-control:focus {
+    border-color: #007bff;
+    outline: none;
+    box-shadow: 0 0 0 0.2rem rgba(0,123,255,.25);
+}
+
+.form-control[multiple] {
+    height: 120px;
+    overflow-y: auto;
+}
+
+/* Leaflet Custom Marker Styles */
+.custom-div-icon {
+    background-color: transparent !important;
+    border: none !important;
+    text-align: center;
+}
+
+.marker-green i { color: #28a745 !important; } 
+.marker-red i { color: #dc3545 !important; } 
+.marker-blue i { color: #007bff !important; } 
+
+/* Estilos de Leaflet.draw para diferenciar de las geocercas guardadas */
+.leaflet-draw-tooltip {
+    background: #333;
+    color: #fff;
+    border-radius: 4px;
+    padding: 5px 8px;
+    font-size: 13px;
+    white-space: nowrap;
+}
+
+.leaflet-draw-guideline {
+    border-color: #3498db; 
+}
+
+/* Estilos para el switch (checkbox de visibilidad) */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 34px;
+  height: 20px;
+}
+
+.switch input { 
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: #ccc;
+  -webkit-transition: .4s;
+  transition: .4s;
+  border-radius: 20px; /* Borde redondeado para el slider */
+}
+
+.slider:before {
+  position: absolute;
+  content: "";
+  height: 16px;
+  width: 16px;
+  left: 2px;
+  bottom: 2px;
+  background-color: white;
+  -webkit-transition: .4s;
+  transition: .4s;
+  border-radius: 50%; /* Hacer el "pulgar" del slider redondo */
+}
+
+input:checked + .slider {
+  background-color: #3498db; /* Color cuando está activo */
+}
+
+input:focus + .slider {
+  box-shadow: 0 0 1px #3498db;
+}
+
+input:checked + .slider:before {
+  -webkit-transform: translateX(14px);
+  -ms-transform: translateX(14px);
+  transform: translateX(14px);
+}

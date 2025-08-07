@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard LoRaWAN</title>
+    <!-- Enlaces a hojas de estilo CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css"/>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css"/>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css"/>
+    <!-- Hoja de estilo personalizada de la aplicación -->
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <!-- Encabezado de la aplicación -->
+    <header class="header">
+        <div class="header-content">
+            <h1><i class="fas fa-broadcast-tower"></i> Monitoreo LoRaWAN</h1>
+        </div>
+    </header>
+
+    <!-- Contenedor principal del dashboard -->
+    <main class="main-container">
+        <div class="dashboard">
+            <!-- Barra lateral de navegación -->
+            <aside class="sidebar">
+                <nav class="sidebar-tabs">
+                    <!-- Pestañas de navegación con iconos y función onclick para cambiar de vista -->
+                    <div id="tab-devices" class="sidebar-tab" onclick="switchTab('devices')"><i class="fas fa-microchip"></i> Dispositivos</div>
+                    <div id="tab-groups" class="sidebar-tab" onclick="switchTab('groups')"><i class="fas fa-users"></i> Grupos</div>
+                    <div id="tab-geofences" class="sidebar-tab" onclick="switchTab('geofences')"><i class="fas fa-draw-polygon"></i> Geocercas</div>
+                </nav>
+                <div class="sidebar-content">
+                    <!-- Contenido de la pestaña de Dispositivos -->
+                    <div id="devicesTab" class="tab-content">
+                        <h2>Dispositivos Activos</h2>
+                        <div id="deviceList" class="device-list"></div>
+                    </div>
+                    <!-- Contenido de la pestaña de Grupos -->
+                    <div id="groupsTab" class="tab-content">
+                        <h2>Grupos <button class="btn btn-sm btn-primary" onclick="showGroupModal()">+ Crear</button></h2>
+                        <div id="groupList" class="group-list"></div>
+                    </div>
+                    <!-- Contenido de la pestaña de Geocercas -->
+                    <div id="geofencesTab" class="tab-content">
+                        <h2>Geocercas <button class="btn btn-sm btn-success" onclick="showGeofenceModal()">+ Crear</button></h2>
+                        <div id="geofenceList" class="geofence-list"></div>
+                    </div>
+                </div>
+            </aside>
+            <!-- Contenedor del mapa Leaflet -->
+            <section class="map-container">
+                <div id="map"></div>
+            </section>
+        </div>
+    </main>
+
+    <!-- Modales (ventanas emergentes) -->
+
+    <!-- Modal para Crear/Editar Grupo -->
+    <div id="groupModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 class="modal-title">Crear/Editar Grupo</h3>
+                <button type="button" class="close" onclick="closeModal('groupModal')">&times;</button>
+            </div>
+            <input type="hidden" id="groupId">
+            <div class="form-group">
+                <label class="form-label" for="groupName">Nombre:</label>
+                <input type="text" id="groupName" class="form-control">
+            </div>
+            <div class="form-group">
+                <label class="form-label" for="groupDescription">Descripción:</label>
+                <textarea id="groupDescription" class="form-control" rows="3"></textarea>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Dispositivos:</label>
+                <select id="groupDevices" class="form-control" multiple></select>
+            </div>
+            <button type="button" class="btn btn-primary" style="width:100%;" onclick="createGroup()">Guardar</button>
+        </div>
+    </div>
+
+    <!-- Modal para Crear/Editar Geocerca -->
+    <div id="geofenceModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 class="modal-title">Crear/Editar Geocerca</h3>
+                <button type="button" class="close" onclick="closeModal('geofenceModal')">&times;</button>
+            </div>
+            <input type="hidden" id="geofenceId">
+            <div class="form-group">
+                <label class="form-label" for="geofenceName">Nombre:</label>
+                <input type="text" id="geofenceName" class="form-control">
+            </div>
+            <div class="form-group">
+                <label class="form-label" for="geofenceGroup">Grupo:</label>
+                <select id="geofenceGroup" class="form-control"></select>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Tipo:</label>
+                <select id="geofenceType" class="form-control" onchange="toggleGeofenceRadius()">
+                    <option value="polygon">Polígono</option>
+                    <option value="circle">Círculo</option>
+                </select>
+            </div>
+            <div class="form-group" id="geofenceRadiusGroup" style="display: none;">
+                <label class="form-label" for="geofenceRadius">Radio (metros):</label>
+                <input type="number" id="geofenceRadius" class="form-control" min="1">
+            </div>
+            <p>Dibuja la geocerca en el mapa.</p>
+            <button type="button" class="btn btn-primary" style="width:100%;" onclick="createGeofence()">Guardar Geocerca</button>
+        </div>
+    </div>
+
+    <!-- Nuevo Modal para Detalles de Grupo -->
+    <div id="groupDetailsModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 class="modal-title">Detalles del Grupo: <span id="detailGroupName"></span></h3>
+                <button type="button" class="close" onclick="closeModal('groupDetailsModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p><b>Descripción:</b> <span id="detailGroupDescription"></span></p>
+                <h4>Dispositivos en este grupo:</h4>
+                <div id="detailGroupDevicesList" class="detail-list"></div>
+                <h4>Geocercas asociadas:</h4>
+                <div id="detailGroupGeofencesList" class="detail-list"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Scripts JavaScript -->
+    <!-- Librerías externas -->
+    <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+    <!-- Scripts de la aplicación -->
+    <script src="/app.js"></script>
+    <script src="/geofences.js"></script>
+</body>
+</html>
