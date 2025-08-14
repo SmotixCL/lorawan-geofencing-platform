@@ -80,25 +80,49 @@ async def send_geofence_to_device(dev_eui: str, lat: float, lng: float, radius: 
     """
     Envía una geocerca circular al dispositivo vía downlink.
     
-    Args:
-        dev_eui: DevEUI del dispositivo
-        lat: Latitud del centro
-        lng: Longitud del centro
-        radius: Radio en metros
+    IMPORTANTE: El formato debe coincidir con lo que espera la ESP32:
+    - Puerto 10 para comandos de geocerca
+    - [0]: Tipo (1 byte) - 0x01 para círculo
+    - [1-4]: Latitud (4 bytes, float little-endian)
+    - [5-8]: Longitud (4 bytes, float little-endian)  
+    - [9-10]: Radio (2 bytes, uint16 big-endian)
     """
     try:
-        # Comando 0x02 = actualizar geocerca
-        # Formato: [CMD][LAT_4bytes][LNG_4bytes][RADIUS_2bytes]
-        lat_int = int(lat * 10000000)
-        lng_int = int(lng * 10000000)
+        # Log detallado de los valores recibidos
+        logger.info(f"📍 Preparando geocerca para {dev_eui}")
+        logger.info(f"   Valores recibidos: lat={lat}, lng={lng}, radius={radius}")
         
-        payload = struct.pack('<Biih', 
-                             0x02,     # Comando
-                             lat_int,  # Latitud
-                             lng_int,  # Longitud  
-                             radius)   # Radio
+        # Validar valores
+        if abs(lat) > 90 or abs(lng) > 180:
+            logger.error(f"❌ Coordenadas inválidas: {lat}, {lng}")
+            return False
         
+        # Construir payload binario
+        payload = bytearray()
+        
+        # Tipo de geocerca (1 byte) - 0x01 = círculo
+        payload.append(0x01)
+        
+        # Latitud (4 bytes, float little-endian)
+        payload.extend(struct.pack('<f', float(lat)))
+        
+        # Longitud (4 bytes, float little-endian)
+        payload.extend(struct.pack('<f', float(lng)))
+        
+        # Radio (2 bytes, uint16 big-endian)
+        radius_int = max(1, min(int(radius), 65535))  # Limitar entre 1 y 65535
+        payload.extend(struct.pack('>H', radius_int))
+        
+        # Convertir a base64
         payload_b64 = base64.b64encode(payload).decode('utf-8')
+        
+        # Log del payload
+        logger.info(f"📡 Enviando a ChirpStack:")
+        logger.info(f"   DevEUI: {dev_eui}")
+        logger.info(f"   Puerto: 10")
+        logger.info(f"   Payload hex: {payload.hex()}")
+        logger.info(f"   Payload B64: {payload_b64}")
+        logger.info(f"   Tamaño: {len(payload)} bytes")
         
         url = f"{CHIRPSTACK_API_URL}/api/devices/{dev_eui}/queue"
         headers = {
@@ -109,28 +133,29 @@ async def send_geofence_to_device(dev_eui: str, lat: float, lng: float, radius: 
         data = {
             "deviceQueueItem": {
                 "devEUI": dev_eui,
-                "fPort": 2,
+                "fPort": 10,  # CRÍTICO: Puerto 10 para geocercas
                 "data": payload_b64,
                 "confirmed": False
             }
         }
         
-        logger.info(f"📍 Enviando geocerca a {dev_eui}")
-        logger.info(f"   Centro: {lat:.6f}, {lng:.6f}")
-        logger.info(f"   Radio: {radius}m")
-        
         async with aiohttp.ClientSession() as session:
             async with session.post(url, json=data, headers=headers) as response:
                 if response.status == 200:
-                    logger.info(f"✅ Geocerca enviada exitosamente a {dev_eui}")
+                    result = await response.json()
+                    logger.info(f"✅ Geocerca enviada exitosamente")
+                    logger.info(f"   FCnt: {result.get('fCnt', 'N/A')}")
                     return True
                 else:
                     error_text = await response.text()
-                    logger.error(f"❌ Error enviando geocerca: {response.status} - {error_text}")
+                    logger.error(f"❌ Error enviando: {response.status}")
+                    logger.error(f"   {error_text}")
                     return False
                     
     except Exception as e:
-        logger.error(f"❌ Excepción enviando geocerca: {e}")
+        logger.error(f"❌ Excepción: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return False
 
 async def add_position_task(device_id: int, dev_eui: str, lat: float, lng: float, 
