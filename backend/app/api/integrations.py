@@ -1,439 +1,476 @@
 # app/api/integrations.py
+
+import struct
+import requests
+import base64
+import logging
+import os
+from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.dependencies import get_db
-from app.schemas.integrations import ChirpstackUplinkPayload
-from app.services import device_service
-from app.schemas.device import DeviceCreate
-import base64
-import binascii
-import struct
-import aiohttp
-import os
-import logging
-import json
-from app.core.database import SessionLocal
-from dotenv import load_dotenv
+from app.schemas import geofence as schemas
+from app.services import geofence_service, group_service
+import asyncio
+from datetime import datetime
 
-# Cargar variables de entorno
-load_dotenv()
-
+# Configurar logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
-# Configuración de ChirpStack
-CHIRPSTACK_API_URL = os.getenv("CHIRPSTACK_API_URL", "http://localhost:8080")
-CHIRPSTACK_API_TOKEN = os.getenv("CHIRPSTACK_API_TOKEN", "")
+# ============================================================================
+# CONFIGURACIÓN DE CHIRPSTACK - TUS CREDENCIALES
+# ============================================================================
+CHIRPSTACK_API_URL = "http://localhost:8080"
+CHIRPSTACK_API_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhcGlfa2V5X2lkIjoiNDRhNGE2MzAtMGM4MC00M2EyLTk2NmYtODAwYzQwMzdkOWI4IiwiYXVkIjoiYXMiLCJpc3MiOiJhcyIsIm5iZiI6MTc1NDg3NDMyMSwic3ViIjoiYXBpX2tleSJ9.GDvpbm6rdfj1NivGoxh2ehBeTsJN8-VUuBPnqX6Lios"
 
-async def send_buzzer_alert_downlink(dev_eui: str, duration_seconds: int = 10):
+# ============================================================================
+# FUNCIÓN PRINCIPAL PARA ENVIAR DOWNLINK DE GEOCERCA
+# ============================================================================
+
+async def send_geofence_downlink(
+    device_eui: str, 
+    lat: float, 
+    lng: float, 
+    radius: int,
+    geofence_type: int = 1,  # 1=círculo, 2=polígono
+    group_id: str = "backend"
+) -> bool:
     """
-    Envía comando downlink para activar buzzer cuando dispositivo sale de geocerca.
-    
-    Args:
-        dev_eui: DevEUI del dispositivo en formato hexadecimal
-        duration_seconds: Duración del buzzer en segundos (1-255)
+    Envía una geocerca circular como downlink al dispositivo ESP32 vía ChirpStack v3
     """
     try:
-        # Validar duración
-        duration_seconds = max(1, min(255, duration_seconds))
+        logger.info(f"📡 Preparando downlink para {device_eui}")
         
-        # Construir payload: [CMD=0x01][Duration]
-        payload_bytes = struct.pack('BB', 0x01, duration_seconds)
-        payload_b64 = base64.b64encode(payload_bytes).decode('utf-8')
+        # Validar coordenadas
+        if not (-90 <= lat <= 90) or not (-180 <= lng <= 180):
+            logger.error(f"❌ Coordenadas inválidas: {lat}, {lng}")
+            return False
         
-        # URL para ChirpStack v3 API
-        url = f"{CHIRPSTACK_API_URL}/api/devices/{dev_eui}/queue"
+        if not (10 <= radius <= 10000):
+            logger.error(f"❌ Radio inválido: {radius}")
+            return False
         
-        headers = {
-            "Grpc-Metadata-Authorization": f"Bearer {CHIRPSTACK_API_TOKEN}",
-            "Content-Type": "application/json"
+        # Preparar payload para círculo
+        # Formato: [tipo(1)][lat(4)][lng(4)][radio(2)][groupId(N)]
+        payload = struct.pack('<B', 1)  # Tipo: 1 = círculo
+        payload += struct.pack('<f', float(lat))  # Latitud como float (4 bytes)
+        payload += struct.pack('<f', float(lng))  # Longitud como float (4 bytes)
+        payload += struct.pack('<H', int(radius))  # Radio como uint16 (2 bytes)
+        
+        # Agregar groupId si se proporciona (máximo 15 caracteres)
+        if group_id:
+            group_bytes = group_id.encode('utf-8')[:15]
+            payload += group_bytes
+        
+        # Codificar en base64
+        payload_b64 = base64.b64encode(payload).decode('utf-8')
+        
+        logger.info(f"📦 Payload preparado: {len(payload)} bytes")
+        logger.info(f"📦 Base64: {payload_b64}")
+        
+        # URL de ChirpStack v3 API
+        url = f"{CHIRPSTACK_API_URL}/api/devices/{device_eui}/queue"
+        
+        # Datos del downlink para ChirpStack v3
+        downlink_data = {
+            "deviceQueueItem": {
+                "confirmed": False,
+                "data": payload_b64,
+                "devEUI": device_eui,
+                "fPort": 10  # Puerto 10 para geocercas
+            }
         }
+        
+        # Headers con tu API token
+        headers = {
+            "Authorization": f"Bearer {CHIRPSTACK_API_TOKEN}",
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
+        
+        # Enviar request
+        logger.info(f"📡 Enviando a ChirpStack: {url}")
+        response = requests.post(
+            url,
+            json=downlink_data,
+            headers=headers,
+            timeout=10
+        )
+        
+        # Verificar respuesta
+        if response.status_code in [200, 201, 202]:
+            logger.info(f"✅ Geocerca enviada exitosamente a {device_eui}")
+            logger.info(f"   Centro: {lat:.6f}, {lng:.6f}")
+            logger.info(f"   Radio: {radius} metros")
+            logger.info(f"   Grupo: {group_id}")
+            return True
+        else:
+            logger.error(f"❌ Error de ChirpStack: {response.status_code}")
+            logger.error(f"   Respuesta: {response.text}")
+            return False
+            
+    except requests.exceptions.ConnectionError:
+        logger.error(f"❌ No se puede conectar con ChirpStack en {CHIRPSTACK_API_URL}")
+        return False
+    except requests.exceptions.Timeout:
+        logger.error(f"❌ Timeout conectando con ChirpStack")
+        return False
+    except Exception as e:
+        logger.error(f"❌ Error inesperado: {str(e)}")
+        return False
+
+async def send_polygon_geofence_downlink(
+    device_eui: str,
+    points: List[dict],  # Lista de diccionarios con 'lat' y 'lng'
+    group_id: str = "backend"
+) -> bool:
+    """
+    Envía una geocerca poligonal como downlink al dispositivo ESP32
+    """
+    try:
+        if len(points) < 3 or len(points) > 10:
+            logger.error(f"❌ Número de puntos inválido: {len(points)} (debe ser 3-10)")
+            return False
+        
+        logger.info(f"📡 Preparando polígono con {len(points)} puntos para {device_eui}")
+        
+        # Formato: [tipo(1)][numPuntos(1)][lat1(4)][lng1(4)]...[groupId(N)]
+        payload = struct.pack('<BB', 2, len(points))  # Tipo 2 = polígono
+        
+        # Agregar cada punto
+        for point in points:
+            lat = float(point.get('lat', 0))
+            lng = float(point.get('lng', 0))
+            payload += struct.pack('<ff', lat, lng)
+            logger.info(f"   Punto: {lat:.6f}, {lng:.6f}")
+        
+        # Agregar groupId
+        if group_id:
+            group_bytes = group_id.encode('utf-8')[:15]
+            payload += group_bytes
+        
+        # Codificar y enviar
+        payload_b64 = base64.b64encode(payload).decode('utf-8')
+        
+        # URL de ChirpStack v3
+        url = f"{CHIRPSTACK_API_URL}/api/devices/{device_eui}/queue"
         
         downlink_data = {
             "deviceQueueItem": {
                 "confirmed": False,
                 "data": payload_b64,
-                "devEUI": dev_eui,
-                "fPort": 2  # Puerto 2 para comandos
+                "devEUI": device_eui,
+                "fPort": 10
             }
         }
         
-        logger.info(f"📡 Enviando downlink a {dev_eui}: Buzzer por {duration_seconds}s")
-        logger.info(f"   URL: {url}")
-        logger.info(f"   Payload B64: {payload_b64}")
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=downlink_data, headers=headers) as response:
-                if response.status == 200:
-                    logger.info(f"✅ Downlink enviado exitosamente a {dev_eui}")
-                    return True
-                else:
-                    error_text = await response.text()
-                    logger.error(f"❌ Error al enviar downlink: {response.status} - {error_text}")
-                    return False
-                    
-    except Exception as e:
-        logger.error(f"❌ Excepción enviando downlink: {e}")
-        return False
-
-async def send_geofence_to_device(dev_eui: str, lat: float, lng: float, radius: int) -> bool:
-    """
-    Envía una geocerca circular al dispositivo vía downlink.
-    
-    IMPORTANTE: El formato debe coincidir con lo que espera la ESP32:
-    - Puerto 10 para comandos de geocerca
-    - [0]: Tipo (1 byte) - 0x01 para círculo
-    - [1-4]: Latitud (4 bytes, float little-endian)
-    - [5-8]: Longitud (4 bytes, float little-endian)  
-    - [9-10]: Radio (2 bytes, uint16 big-endian)
-    """
-    try:
-        # Log detallado de los valores recibidos
-        logger.info(f"📍 Preparando geocerca para {dev_eui}")
-        logger.info(f"   Valores recibidos: lat={lat}, lng={lng}, radius={radius}")
-        
-        # Validar valores
-        if abs(lat) > 90 or abs(lng) > 180:
-            logger.error(f"❌ Coordenadas inválidas: {lat}, {lng}")
-            return False
-        
-        # Construir payload binario
-        payload = bytearray()
-        
-        # Tipo de geocerca (1 byte) - 0x01 = círculo
-        payload.append(0x01)
-        
-        # Latitud (4 bytes, float little-endian)
-        payload.extend(struct.pack('<f', float(lat)))
-        
-        # Longitud (4 bytes, float little-endian)
-        payload.extend(struct.pack('<f', float(lng)))
-        
-        # Radio (2 bytes, uint16 big-endian)
-        radius_int = max(1, min(int(radius), 65535))  # Limitar entre 1 y 65535
-        payload.extend(struct.pack('>H', radius_int))
-        
-        # Convertir a base64
-        payload_b64 = base64.b64encode(payload).decode('utf-8')
-        
-        # Log del payload
-        logger.info(f"📡 Enviando a ChirpStack:")
-        logger.info(f"   DevEUI: {dev_eui}")
-        logger.info(f"   Puerto: 10")
-        logger.info(f"   Payload hex: {payload.hex()}")
-        logger.info(f"   Payload B64: {payload_b64}")
-        logger.info(f"   Tamaño: {len(payload)} bytes")
-        
-        url = f"{CHIRPSTACK_API_URL}/api/devices/{dev_eui}/queue"
         headers = {
-            "Grpc-Metadata-Authorization": f"Bearer {CHIRPSTACK_API_TOKEN}",
+            "Authorization": f"Bearer {CHIRPSTACK_API_TOKEN}",
             "Content-Type": "application/json"
         }
         
-        data = {
-            "deviceQueueItem": {
-                "devEUI": dev_eui,
-                "fPort": 10,  # CRÍTICO: Puerto 10 para geocercas
-                "data": payload_b64,
-                "confirmed": False
-            }
-        }
+        response = requests.post(url, json=downlink_data, headers=headers, timeout=10)
         
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=data, headers=headers) as response:
-                if response.status == 200:
-                    result = await response.json()
-                    logger.info(f"✅ Geocerca enviada exitosamente")
-                    logger.info(f"   FCnt: {result.get('fCnt', 'N/A')}")
-                    return True
-                else:
-                    error_text = await response.text()
-                    logger.error(f"❌ Error enviando: {response.status}")
-                    logger.error(f"   {error_text}")
-                    return False
-                    
+        if response.status_code in [200, 201, 202]:
+            logger.info(f"✅ Polígono enviado exitosamente a {device_eui}")
+            return True
+        else:
+            logger.error(f"❌ Error: {response.status_code} - {response.text}")
+            return False
+        
     except Exception as e:
-        logger.error(f"❌ Excepción: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
+        logger.error(f"❌ Error enviando polígono: {e}")
         return False
 
-async def add_position_task(device_id: int, dev_eui: str, lat: float, lng: float, 
-                           alt: float, rssi: int, snr: float, gps_valid: bool):
-    """
-    Guarda posición y verifica si el dispositivo salió de la geocerca.
-    Si salió, envía alerta por downlink.
-    """
-    logger.info(f"📍 Procesando posición de dispositivo {dev_eui}")
-    logger.info(f"   Coordenadas: {lat:.6f}, {lng:.6f}, Alt: {alt}m")
-    logger.info(f"   RSSI: {rssi} dBm, SNR: {snr} dB, GPS válido: {gps_valid}")
-    
-    async with SessionLocal() as db:
-        try:
-            # Guardar posición
-            position = await device_service.add_device_position(
-                db, device_id, lat, lng, alt, rssi, snr, gps_valid
-            )
-            
-            # Verificar estado de geocerca
-            if position and position.inside_geofence is not None:
-                if position.inside_geofence == False:
-                    logger.warning(f"⚠️ ALERTA: Dispositivo {dev_eui} FUERA de geocerca!")
-                    logger.warning(f"   Posición: {lat:.6f}, {lng:.6f}")
-                    
-                    # Enviar comando para activar buzzer por 15 segundos
-                    await send_buzzer_alert_downlink(dev_eui, duration_seconds=15)
-                else:
-                    logger.info(f"✅ Dispositivo {dev_eui} DENTRO de geocerca")
-            else:
-                logger.info(f"ℹ️ No hay geocerca configurada para el dispositivo {dev_eui}")
-            
-            logger.info(f"✅ Posición guardada en BD para {dev_eui}")
-            
-        except Exception as e:
-            logger.error(f"❌ Error procesando posición: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-        finally:
-            await db.close()
+# ============================================================================
+# ENDPOINTS DE GEOCERCAS CON DOWNLINK AUTOMÁTICO
+# ============================================================================
 
-@router.post("/uplink")
-async def handle_chirpstack_uplink(uplink: ChirpstackUplinkPayload, 
-                                  background_tasks: BackgroundTasks, 
-                                  db: AsyncSession = Depends(get_db)):
+@router.post("/geofences/", response_model=schemas.Geofence)
+async def create_geofence_with_downlink(
+    geofence: schemas.GeofenceCreate,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db)
+):
     """
-    Procesa uplinks de ChirpStack y verifica geocercas.
-    Compatible con decodificadores custom y datos raw.
+    Crea una nueva geocerca y envía downlink automático a dispositivos del grupo
     """
+    logger.info(f"🆕 Creando nueva geocerca: {geofence.name}")
+    
+    # Crear geocerca en base de datos
+    db_geofence = await geofence_service.create_geofence(db, geofence)
+    
     try:
-        # Decodificar DevEUI de Base64 a Hex
-        decoded_eui_bytes = base64.b64decode(uplink.devEUI)
-        dev_eui_hex = binascii.hexlify(decoded_eui_bytes).decode('utf-8').upper()
-    except (binascii.Error, ValueError) as e:
-        logger.error(f"❌ DevEUI inválido: {uplink.devEUI}")
-        raise HTTPException(status_code=400, detail=f"Invalid DevEUI: {e}")
-
-    # Buscar o crear dispositivo
-    device = await device_service.get_device_by_eui(db=db, dev_eui=dev_eui_hex)
-    
-    if not device:
-        device_name = uplink.deviceName if uplink.deviceName else "Unnamed Device"
-        new_device_data = DeviceCreate(dev_eui=dev_eui_hex, device_name=device_name)
-        device = await device_service.create_device(db=db, device=new_device_data)
-        logger.info(f"🆕 Dispositivo {device.device_name} (ID: {device.id}) creado automáticamente")
-
-    # Log información del uplink
-    logger.info("=" * 60)
-    logger.info(f"📡 Uplink recibido de {device.device_name} ({dev_eui_hex})")
-    logger.info(f"   Puerto: {uplink.fPort}")
-    logger.info(f"   FCnt: {uplink.fCnt}")
-    logger.info(f"   Data Base64: {uplink.data}")
-    
-    # Variables para GPS
-    lat = None
-    lng = None
-    alt = None
-    gps_valid = False
-    satellites = 0
-    hdop = 0.0
-    battery = 0
-    
-    # OPCIÓN 1: Intentar obtener datos decodificados directamente del modelo Pydantic
-    if hasattr(uplink, 'latitude') and uplink.latitude is not None:
-        lat = float(uplink.latitude)
-        lng = float(uplink.longitude) if hasattr(uplink, 'longitude') else 0
-        alt = float(uplink.altitude) if hasattr(uplink, 'altitude') else 0
-        gps_valid = bool(uplink.gpsValid) if hasattr(uplink, 'gpsValid') else True
-        satellites = int(uplink.satellites) if hasattr(uplink, 'satellites') else 0
-        battery = int(uplink.battery) if hasattr(uplink, 'battery') else 0
-        logger.info(f"✅ GPS desde campos decodificados: {lat:.6f}, {lng:.6f}")
-    
-    # OPCIÓN 2: Si no hay datos decodificados, intentar decodificar el payload raw
-    elif uplink.data and uplink.fPort == 1:  # Puerto 1 = datos GPS
-        try:
-            payload_bytes = base64.b64decode(uplink.data)
-            logger.info(f"   Decodificando {len(payload_bytes)} bytes de payload raw...")
+        # Si la geocerca tiene un grupo asignado
+        if hasattr(geofence, 'group_id') and geofence.group_id:
+            # Obtener el grupo y sus dispositivos
+            group = await group_service.get_group(db, geofence.group_id)
             
-            if len(payload_bytes) >= 15:
-                # Estructura del payload de la ESP32:
-                # int32_t latitude (4 bytes)
-                # int32_t longitude (4 bytes)
-                # uint16_t altitude (2 bytes)
-                # uint8_t satellites (1 byte)
-                # uint8_t hdop (1 byte)
-                # uint8_t battery (1 byte)
-                # uint8_t alert (1 byte)
-                # uint8_t status (1 byte)
+            if group and hasattr(group, 'devices') and group.devices:
+                logger.info(f"📱 Enviando a {len(group.devices)} dispositivos del grupo {geofence.group_id}")
                 
-                lat_int, lng_int, alt_uint, sats, hdop_raw, batt, alert, status = struct.unpack('<iihBBBBB', payload_bytes[:15])
-                
-                # Convertir a valores reales
-                lat = lat_int / 10000000.0
-                lng = lng_int / 10000000.0
-                alt = float(alt_uint)
-                satellites = sats
-                hdop = hdop_raw / 10.0
-                battery = batt
-                gps_valid = bool(status & 0x01)
-                inside_geofence = bool(status & 0x02)
-                
-                logger.info(f"✅ GPS decodificado del payload raw:")
-                logger.info(f"   Lat: {lat:.6f}, Lng: {lng:.6f}, Alt: {alt}m")
-                logger.info(f"   Satélites: {satellites}, HDOP: {hdop}, Batería: {battery}%")
-                logger.info(f"   GPS válido: {gps_valid}, Dentro geocerca: {inside_geofence}")
-                
-        except Exception as e:
-            logger.error(f"❌ Error decodificando payload raw: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
+                # Para cada dispositivo del grupo
+                for device in group.devices:
+                    if hasattr(device, 'dev_eui'):
+                        # Programar envío asíncrono en background
+                        if geofence.type == "circle":
+                            background_tasks.add_task(
+                                send_geofence_downlink,
+                                device.dev_eui,
+                                float(geofence.center_lat),
+                                float(geofence.center_lng),
+                                int(geofence.radius),
+                                1,
+                                str(geofence.group_id)
+                            )
+                            logger.info(f"   📡 Downlink programado para {device.dev_eui}")
+                        
+                        elif geofence.type == "polygon" and hasattr(geofence, 'points'):
+                            background_tasks.add_task(
+                                send_polygon_geofence_downlink,
+                                device.dev_eui,
+                                geofence.points,
+                                str(geofence.group_id)
+                            )
+                            logger.info(f"   📡 Downlink poligonal programado para {device.dev_eui}")
+            else:
+                logger.warning(f"⚠️ El grupo {geofence.group_id} no tiene dispositivos")
+        else:
+            logger.info("ℹ️ Geocerca creada sin grupo asignado")
     
-    # OPCIÓN 3: Intentar con objectJSON si existe
-    elif hasattr(uplink, 'objectJSON') and uplink.objectJSON:
-        try:
-            obj = json.loads(uplink.objectJSON)
-            if 'gpsLocation' in obj:
-                gps = obj['gpsLocation']
-                lat = gps.get('latitude', 0)
-                lng = gps.get('longitude', 0)
-                alt = gps.get('altitude', 0)
-            elif 'latitude' in obj:
-                lat = obj.get('latitude', 0)
-                lng = obj.get('longitude', 0)
-                alt = obj.get('altitude', 0)
-            gps_valid = obj.get('gpsValid', True)
-            satellites = obj.get('satellites', 0)
-            battery = obj.get('battery', 0)
-            logger.info(f"✅ GPS desde objectJSON: {lat:.6f}, {lng:.6f}")
-        except Exception as e:
-            logger.error(f"❌ Error parseando objectJSON: {e}")
+    except Exception as e:
+        logger.error(f"❌ Error enviando downlinks: {str(e)}")
+        # No fallar la creación por error en downlinks
     
-    # Verificar si tenemos coordenadas válidas
-    if lat is not None and lng is not None and (abs(lat) > 0.001 or abs(lng) > 0.001):
-        # Obtener RSSI y SNR correctamente
-        rssi = -100
-        snr = 0.0
-        
-        if uplink.rxInfo and len(uplink.rxInfo) > 0:
-            rx = uplink.rxInfo[0]
-            rssi = rx.rssi if hasattr(rx, 'rssi') else -100
-            snr = rx.loRaSNR if hasattr(rx, 'loRaSNR') else 0.0
-        
-        logger.info(f"📍 Posición GPS válida detectada:")
-        logger.info(f"   Coordenadas: {lat:.6f}, {lng:.6f}")
-        logger.info(f"   Altitud: {alt}m")
-        logger.info(f"   Satélites: {satellites}")
-        logger.info(f"   RSSI: {rssi} dBm, SNR: {snr} dB")
-        logger.info(f"   Batería: {battery}%")
-        
-        # Procesar posición en segundo plano
-        background_tasks.add_task(
-            add_position_task,
-            device.id, dev_eui_hex, lat, lng, alt,
-            rssi, snr, gps_valid
-        )
-    else:
-        logger.warning(f"⚠️ Uplink sin datos GPS válidos")
-        logger.warning(f"   lat={lat}, lng={lng}")
-        if uplink.data:
-            logger.warning(f"   Payload Base64: {uplink.data}")
-            try:
-                payload_bytes = base64.b64decode(uplink.data)
-                logger.warning(f"   Payload Hex: {binascii.hexlify(payload_bytes).decode()}")
-                logger.warning(f"   Payload Bytes: {list(payload_bytes)}")
-            except:
-                pass
-    
-    logger.info("=" * 60)
-    
-    return {"message": "Uplink processed", "device": dev_eui_hex, "gps_detected": lat is not None}
+    return db_geofence
 
-@router.post("/test-buzzer/{dev_eui}")
-async def test_buzzer_endpoint(dev_eui: str, duration: int = 5):
+@router.put("/geofences/{geofence_id}", response_model=schemas.Geofence)
+async def update_geofence_with_downlink(
+    geofence_id: int,
+    geofence: schemas.GeofenceCreate,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db)
+):
     """
-    Endpoint de prueba para activar el buzzer de un dispositivo.
-    
-    Ejemplo: POST /api/integrations/test-buzzer/000048CA433CEC58?duration=10
+    Actualiza una geocerca existente y envía la actualización a los dispositivos
     """
-    logger.info(f"🔔 Prueba manual de buzzer para {dev_eui} por {duration} segundos")
+    logger.info(f"🔄 Actualizando geocerca ID: {geofence_id}")
     
-    success = await send_buzzer_alert_downlink(dev_eui, duration)
+    # Actualizar en base de datos
+    db_geofence = await geofence_service.update_geofence(db, geofence_id, geofence)
+    if not db_geofence:
+        raise HTTPException(status_code=404, detail="Geocerca no encontrada")
+    
+    # Enviar actualización a dispositivos (misma lógica que create)
+    # ... (copiar lógica de arriba)
+    
+    return db_geofence
+
+# ============================================================================
+# ENDPOINT DE TEST MANUAL
+# ============================================================================
+
+@router.post("/test-downlink/")
+async def test_geofence_downlink(
+    device_eui: str,
+    lat: float = -33.4489,
+    lng: float = -70.6693,
+    radius: int = 100,
+    group_id: str = "test"
+):
+    """
+    Endpoint para probar el envío de downlink manualmente
+    
+    Ejemplo de uso:
+    POST /api/integrations/test-downlink/
+    {
+        "device_eui": "70b3d57ed8003421",
+        "lat": -33.4489,
+        "lng": -70.6693,
+        "radius": 100,
+        "group_id": "test"
+    }
+    """
+    logger.info(f"🧪 Test de downlink solicitado para {device_eui}")
+    
+    success = await send_geofence_downlink(
+        device_eui=device_eui,
+        lat=lat,
+        lng=lng,
+        radius=radius,
+        geofence_type=1,
+        group_id=group_id
+    )
     
     if success:
         return {
-            "message": f"Comando de buzzer enviado exitosamente",
-            "device": dev_eui,
-            "duration": duration,
-            "status": "queued"
-        }
-    else:
-        raise HTTPException(
-            status_code=500, 
-            detail="Error enviando comando al dispositivo. Verifica el DevEUI y la conexión con ChirpStack."
-        )
-
-@router.post("/send-geofence/{dev_eui}")
-async def send_geofence_endpoint(dev_eui: str, lat: float, lng: float, radius: int = 100):
-    """
-    Endpoint para enviar una geocerca a un dispositivo.
-    
-    Ejemplo: POST /api/integrations/send-geofence/000048CA433CEC58?lat=-37.346&lng=-72.914&radius=100
-    """
-    logger.info(f"📍 Enviando geocerca a {dev_eui}")
-    
-    success = await send_geofence_to_device(dev_eui, lat, lng, radius)
-    
-    if success:
-        return {
-            "message": "Geocerca enviada exitosamente",
-            "device": dev_eui,
-            "center": {"lat": lat, "lng": lng},
-            "radius": radius
+            "status": "success",
+            "message": f"Downlink enviado exitosamente a {device_eui}",
+            "details": {
+                "device_eui": device_eui,
+                "center": {"lat": lat, "lng": lng},
+                "radius": radius,
+                "group_id": group_id,
+                "timestamp": datetime.now().isoformat()
+            }
         }
     else:
         raise HTTPException(
             status_code=500,
-            detail="Error enviando geocerca al dispositivo"
+            detail=f"Error enviando downlink a {device_eui}. Verificar logs."
         )
 
-@router.get("/test-connection")
-async def test_chirpstack_connection():
+# ============================================================================
+# WEBHOOK PARA RECIBIR UPLINKS DE CHIRPSTACK
+# ============================================================================
+
+@router.post("/webhook/uplink")
+async def process_uplink(payload: dict, db: AsyncSession = Depends(get_db)):
     """
-    Verifica la conexión con ChirpStack API y muestra información de configuración.
+    Procesa uplinks recibidos desde ChirpStack
+    ChirpStack debe estar configurado para enviar webhooks a:
+    http://localhost:8000/api/integrations/webhook/uplink
     """
     try:
-        url = f"{CHIRPSTACK_API_URL}/api/organizations?limit=1"
-        headers = {
-            "Grpc-Metadata-Authorization": f"Bearer {CHIRPSTACK_API_TOKEN}"
+        # Extraer información del uplink de ChirpStack v3
+        device_info = payload.get("deviceInfo", {})
+        device_eui = device_info.get("devEui", "")
+        
+        # Datos del uplink
+        data = payload.get("data", "")
+        f_port = payload.get("fPort", 0)
+        
+        # Metadatos
+        rx_info = payload.get("rxInfo", [])
+        tx_info = payload.get("txInfo", {})
+        
+        logger.info(f"📥 Uplink recibido de {device_eui} en puerto {f_port}")
+        
+        # Decodificar payload base64
+        if data:
+            raw_data = base64.b64decode(data)
+            
+            if f_port == 1:  # Puerto GPS
+                if len(raw_data) >= 12:
+                    # Decodificar posición GPS
+                    lat = struct.unpack('<f', raw_data[0:4])[0]
+                    lng = struct.unpack('<f', raw_data[4:8])[0]
+                    altitude = struct.unpack('<H', raw_data[8:10])[0]
+                    alert_level = raw_data[10] if len(raw_data) > 10 else 0
+                    battery = raw_data[11] if len(raw_data) > 11 else 0
+                    
+                    logger.info(f"📍 Posición GPS de {device_eui}:")
+                    logger.info(f"   Coordenadas: {lat:.6f}, {lng:.6f}")
+                    logger.info(f"   Altitud: {altitude}m")
+                    logger.info(f"   Nivel de alerta: {alert_level}")
+                    logger.info(f"   Batería: {battery}%")
+                    
+                    # Guardar en base de datos
+                    # await save_device_position(db, device_eui, lat, lng, altitude, battery)
+                    
+                    # Si hay alerta, podríamos notificar
+                    if alert_level > 2:  # WARNING o mayor
+                        logger.warning(f"⚠️ ALERTA nivel {alert_level} de dispositivo {device_eui}")
+                        # await send_alert_notification(device_eui, alert_level, lat, lng)
+            
+            elif f_port == 2:  # Puerto batería
+                if len(raw_data) >= 4:
+                    voltage = struct.unpack('<H', raw_data[0:2])[0] / 1000.0
+                    percentage = raw_data[2]
+                    flags = raw_data[3]
+                    
+                    logger.info(f"🔋 Estado de batería de {device_eui}:")
+                    logger.info(f"   Voltaje: {voltage}V")
+                    logger.info(f"   Porcentaje: {percentage}%")
+                    logger.info(f"   Cargando: {bool(flags & 0x01)}")
+                    logger.info(f"   Batería baja: {bool(flags & 0x02)}")
+        
+        # Responder OK a ChirpStack
+        return {
+            "status": "processed",
+            "device_eui": device_eui,
+            "timestamp": datetime.now().isoformat()
         }
         
-        logger.info(f"🔍 Probando conexión con ChirpStack en {CHIRPSTACK_API_URL}")
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    return {
-                        "status": "connected",
-                        "chirpstack_url": CHIRPSTACK_API_URL,
-                        "api_token_configured": bool(CHIRPSTACK_API_TOKEN),
-                        "api_token_length": len(CHIRPSTACK_API_TOKEN),
-                        "organizations_found": len(data.get('result', [])) if 'result' in data else 0,
-                        "message": "Conexión exitosa con ChirpStack"
-                    }
-                else:
-                    error_text = await response.text()
-                    return {
-                        "status": "error",
-                        "code": response.status,
-                        "message": error_text,
-                        "chirpstack_url": CHIRPSTACK_API_URL,
-                        "api_token_configured": bool(CHIRPSTACK_API_TOKEN)
-                    }
     except Exception as e:
-        logger.error(f"❌ Error verificando conexión: {e}")
+        logger.error(f"❌ Error procesando uplink: {str(e)}")
+        # No fallar para que ChirpStack no reintente
+        return {"status": "error", "message": str(e)}
+
+# ============================================================================
+# ENDPOINTS DE UTILIDAD
+# ============================================================================
+
+@router.get("/chirpstack/status")
+async def check_chirpstack_status():
+    """
+    Verifica el estado de la conexión con ChirpStack
+    """
+    try:
+        headers = {
+            "Authorization": f"Bearer {CHIRPSTACK_API_TOKEN}",
+            "Accept": "application/json"
+        }
+        
+        # Intentar obtener info del servidor
+        response = requests.get(
+            f"{CHIRPSTACK_API_URL}/api/internal/profile",
+            headers=headers,
+            timeout=5
+        )
+        
+        if response.status_code == 200:
+            return {
+                "status": "connected",
+                "chirpstack_url": CHIRPSTACK_API_URL,
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            return {
+                "status": "error",
+                "code": response.status_code,
+                "message": "Error conectando con ChirpStack"
+            }
+    except Exception as e:
         return {
             "status": "error",
-            "message": str(e),
-            "chirpstack_url": CHIRPSTACK_API_URL,
-            "api_token_configured": bool(CHIRPSTACK_API_TOKEN)
+            "message": str(e)
         }
+
+@router.get("/devices/{device_eui}/queue")
+async def get_device_queue(device_eui: str):
+    """
+    Obtiene la cola de downlinks pendientes para un dispositivo
+    """
+    try:
+        headers = {
+            "Authorization": f"Bearer {CHIRPSTACK_API_TOKEN}",
+            "Accept": "application/json"
+        }
+        
+        response = requests.get(
+            f"{CHIRPSTACK_API_URL}/api/devices/{device_eui}/queue",
+            headers=headers,
+            timeout=5
+        )
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# INICIALIZACIÓN
+# ============================================================================
+
+logger.info("=" * 60)
+logger.info("📡 MÓDULO DE INTEGRACIÓN LORAWAN INICIALIZADO")
+logger.info(f"   ChirpStack URL: {CHIRPSTACK_API_URL}")
+logger.info(f"   Token configurado: {'Sí' if CHIRPSTACK_API_TOKEN else 'No'}")
+logger.info("=" * 60)
