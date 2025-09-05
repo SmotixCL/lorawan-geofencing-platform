@@ -14,6 +14,12 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.dependencies import get_db
 from datetime import datetime
+from .geofence_polygon_compressor import (
+    AU915CoordinateCompressor,
+    create_compressed_polygon_payload,
+    get_optimal_spreading_factor,
+    AU915_PAYLOAD_LIMITS
+)
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
@@ -30,26 +36,30 @@ CHIRPSTACK_API_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhcGlfa2V5X2lkIjo
 # ============================================================================
 # FUNCIÓN PRINCIPAL PARA ENVIAR GEOCERCA AL ESP32
 # ============================================================================
-
 async def send_geofence_downlink(
     device_eui: str, 
-    coordinates: Union[List[Dict], Dict],  # Cambiar parámetros
+    coordinates: Union[List[Dict], Dict],
     geofence_type: str = "circle",
-    group_id: str = "backend"
+    group_id: str = "backend",
+    spreading_factor: str = "SF10"  # Nuevo parámetro opcional
 ) -> bool:
     """
     Envía una geocerca al dispositivo ESP32 vía ChirpStack.
-    Ahora el envío soporta tanto círculos como polígonos.
+    Ahora con compresión automática para polígonos en AU915.
     """
     try:
         logger.info(f"📡 Preparando geocerca para {device_eui}")
         logger.info(f"   Tipo: {geofence_type}")
         logger.info(f"   Grupo: {group_id}")
-                
+        logger.info(f"   Spreading Factor: {spreading_factor}")
+        
+        # Obtener límite de payload según SF
+        max_payload = AU915_PAYLOAD_LIMITS.get(spreading_factor, 51)
+        
         # Construir payload binario según formato esperado por ESP32
         payload = bytearray()
         
-        # Tipo de geocerca (1 byte): 0=círculo, 1=polígono
+        # Tipo de geocerca (1 byte): 0=círculo, 1=polígono, 2=polígono comprimido
         if geofence_type == "circle":
             # Validar parámetros de coordenadas
             if not (-90 <= coordinates['lat'] <= 90) or not (-180 <= coordinates['lng'] <= 180):
@@ -63,14 +73,15 @@ async def send_geofence_downlink(
             logger.info(f"   Centro: {coordinates['lat']:.6f}, {coordinates['lng']:.6f}")
             logger.info(f"   Radio: {coordinates['radius']} metros")
             
-            # Construir el payload para círculo
+            # Construir el payload para círculo (igual que antes)
             payload.append(0)
-            # Latitud (4 bytes, float little-endian)
             payload.extend(struct.pack('<f', float(coordinates['lat'])))
-            # Longitud (4 bytes, float little-endian)
             payload.extend(struct.pack('<f', float(coordinates['lng'])))
-            # Radio (2 bytes, uint16 little-endian)
             payload.extend(struct.pack('<H', int(coordinates['radius'])))
+            
+            # Agregar group_id si cabe
+            if group_id and (len(payload) + len(group_id)) <= max_payload:
+                payload.extend(group_id[:15].encode('ascii'))
             
         elif geofence_type == "polygon":
             if not isinstance(coordinates, list) or len(coordinates) < 3:
@@ -79,36 +90,57 @@ async def send_geofence_downlink(
             
             logger.info(f"   Polígono con {len(coordinates)} puntos")
             
-            # Construir payload para polígono
-            payload.append(1)  # Tipo polígono
+            # Calcular tamaño del payload original
+            original_size = 2 + len(coordinates) * 8 + len(group_id)
             
-            # Número de puntos (1 byte)
-            num_points = min(len(coordinates), 10)  # Límite del ESP32
-            payload.append(num_points)
-            
-            # Coordenadas de cada punto (8 bytes por punto)
-            for i in range(num_points):
-                coord = coordinates[i]
-                logger.info(f"   Punto {i+1}: {coord['lat']:.6f}, {coord['lng']:.6f}")
-                payload.extend(struct.pack('<f', float(coord['lat'])))
-                payload.extend(struct.pack('<f', float(coord['lng'])))
+            # Decidir si usar compresión
+            if original_size <= max_payload and len(coordinates) <= 6:
+                # Usar payload normal (como tu código original)
+                logger.info("   Usando payload normal (no requiere compresión)")
+                payload.append(1)  # Tipo polígono normal
+                
+                num_points = min(len(coordinates), 6)
+                payload.append(num_points)
+                
+                for i in range(num_points):
+                    coord = coordinates[i]
+                    logger.info(f"   Punto {i+1}: {coord['lat']:.6f}, {coord['lng']:.6f}")
+                    payload.extend(struct.pack('<f', float(coord['lat'])))
+                    payload.extend(struct.pack('<f', float(coord['lng'])))
+                
+                # Group_id al final
+                if group_id and (len(payload) + len(group_id)) <= max_payload:
+                    payload.extend(group_id[:15].encode('ascii'))
+                    
+            else:
+                # Usar compresión AU915
+                logger.info("   Aplicando compresión AU915 para polígono grande")
+                try:
+                    payload = create_compressed_polygon_payload(
+                        coordinates, 
+                        group_id, 
+                        spreading_factor
+                    )
+                    logger.info(f"   ✅ Compresión exitosa: {len(payload)} bytes")
+                    
+                except Exception as e:
+                    logger.error(f"   ❌ Error en compresión: {e}")
+                    return False
         
-        # Lógica común: GroupId y envío a ChirpStack
-        
-        # GroupId (opcional, máximo 15 caracteres ASCII)
-        if group_id:
-            group_bytes = group_id[:15].encode('ascii')
-            payload.extend(group_bytes)
+        # Validar tamaño final
+        if len(payload) > max_payload:
+            logger.error(f"❌ Payload excede límite: {len(payload)} > {max_payload} bytes")
+            return False
         
         # Convertir a base64 para ChirpStack
         payload_b64 = base64.b64encode(payload).decode('utf-8')
         
         logger.info(f"📦 Payload preparado:")
-        logger.info(f"   Tamaño: {len(payload)} bytes")
+        logger.info(f"   Tamaño: {len(payload)} bytes (límite: {max_payload})")
         logger.info(f"   Hex: {payload.hex()}")
         logger.info(f"   Base64: {payload_b64}")
         
-        # Preparar request para ChirpStack v3 API
+        # Preparar request para ChirpStack v3 API (igual que antes)
         url = f"{CHIRPSTACK_API_URL}/api/devices/{device_eui}/queue"
         
         headers = {
@@ -116,22 +148,21 @@ async def send_geofence_downlink(
             "Content-Type": "application/json"
         }
         
-        # Estructura de datos para ChirpStack v3
         data = {
             "deviceQueueItem": {
-                "confirmed": False,  # No confirmado para reducir tráfico
+                "confirmed": False,
                 "data": payload_b64,
                 "devEUI": device_eui,
-                "fPort": 10  # Puerto 10 para geocercas (debe coincidir con ESP32)
+                "fPort": 10
             }
         }
         
         # Enviar a ChirpStack
         response = requests.post(url, json=data, headers=headers)
-        logger.info("Esto es lo que estamos enviando")
-        logger.info(url)
-        logger.info(data)
-        logger.info(headers)
+        logger.info("📡 Enviando a ChirpStack:")
+        logger.info(f"   URL: {url}")
+        logger.info(f"   Data: {data}")
+        logger.info(f"   Headers: {headers}")
         
         if response.status_code == 200:
             response_data = response.json()
