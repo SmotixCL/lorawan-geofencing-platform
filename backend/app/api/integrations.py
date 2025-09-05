@@ -45,7 +45,11 @@ async def send_geofence_downlink(
         logger.info(f"📡 Preparando geocerca para {device_eui}")
         logger.info(f"   Tipo: {geofence_type}")
         logger.info(f"   Grupo: {group_id}")
-                
+
+        # Preprocesar groupId para cálculos de capacidad
+        group_bytes = group_id[:15].encode('ascii') if group_id else b''
+        max_payload = 51  # Capacidad máxima del payload LoRaWAN
+
         # Construir payload binario según formato esperado por ESP32
         payload = bytearray()
         
@@ -76,28 +80,46 @@ async def send_geofence_downlink(
             if not isinstance(coordinates, list) or len(coordinates) < 3:
                 logger.error("❌ Polígono debe tener al menos 3 puntos")
                 return False
-            
-            logger.info(f"   Polígono con {len(coordinates)} puntos")
-            
+            # Capacidad disponible para puntos
+            max_points = 1 + (max_payload - 10 - len(group_bytes)) // 4
+            num_points = min(len(coordinates), max_points)
+
+            logger.info(
+                f"   Polígono con {len(coordinates)} puntos (máx {max_points})"
+            )
+            logger.info(
+                "   Formato: lat/lng escalados 1e-5, primer punto absoluto,"
+                " siguientes diferenciales"
+            )
+
             # Construir payload para polígono
             payload.append(1)  # Tipo polígono
-            
-            # Número de puntos (1 byte)
-            num_points = min(len(coordinates), 10)  # Límite del ESP32
             payload.append(num_points)
-            
-            # Coordenadas de cada punto (8 bytes por punto)
-            for i in range(num_points):
-                coord = coordinates[i]
-                logger.info(f"   Punto {i+1}: {coord['lat']:.6f}, {coord['lng']:.6f}")
-                payload.extend(struct.pack('<f', float(coord['lat'])))
-                payload.extend(struct.pack('<f', float(coord['lng'])))
+
+            SCALE = 10 ** 5
+            lat0 = int(round(coordinates[0]['lat'] * SCALE))
+            lng0 = int(round(coordinates[0]['lng'] * SCALE))
+            payload.extend(struct.pack('<ii', lat0, lng0))
+            logger.info(
+                f"   Punto 1: {coordinates[0]['lat']:.6f}, {coordinates[0]['lng']:.6f}"
+                f" -> {lat0},{lng0}"
+            )
+
+            for i, p in enumerate(coordinates[1:num_points], start=2):
+                dlat = int(round(p['lat'] * SCALE - lat0))
+                dlng = int(round(p['lng'] * SCALE - lng0))
+                payload.extend(struct.pack('<hh', dlat, dlng))
+                lat0 += dlat
+                lng0 += dlng
+                logger.info(
+                    f"   Punto {i}: {p['lat']:.6f}, {p['lng']:.6f}"
+                    f" -> Δ{dlat}, Δ{dlng}"
+                )
         
         # Lógica común: GroupId y envío a ChirpStack
         
         # GroupId (opcional, máximo 15 caracteres ASCII)
-        if group_id:
-            group_bytes = group_id[:15].encode('ascii')
+        if group_bytes:
             payload.extend(group_bytes)
         
         # Convertir a base64 para ChirpStack
@@ -146,6 +168,20 @@ async def send_geofence_downlink(
     except Exception as e:
         logger.error(f"❌ Excepción enviando geocerca: {e}")
         return False
+
+
+async def send_polygon_geofence_downlink(
+    device_eui: str,
+    points: List[Dict],
+    group_id: str = "backend",
+) -> bool:
+    """Compatibilidad: envía geocerca poligonal usando codificación diferencial.
+
+    Formato: [tipo=1][n][lat0][lng0][dlat][dlng]... con lat/lng
+    escalados 1e-5, primer punto en int32 y siguientes como deltas int16.
+    """
+
+    return await send_geofence_downlink(device_eui, points, "polygon", group_id)
 
 # ============================================================================
 # WEBHOOK PARA RECIBIR UPLINKS DE CHIRPSTACK
