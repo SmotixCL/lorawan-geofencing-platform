@@ -52,7 +52,16 @@ function initializeApp() {
  */
 function initializeMap() {
     if (map) return;
-    map = L.map('map').setView([-34.6, -58.38], 4);
+    // Creamos la instancia del mapa
+    const INITIAL_LAT = -37.347648;
+    const INITIAL_LONG = -72.9160881;
+    const INITIAL_ZOOM = 17;
+    const MAX_ZOOM = 18; // Por default es 18, cambiar si se desea aumentar. OpenStreetMap puede fallar si es >18
+    map = L.map('map', {
+        maxZoom: MAX_ZOOM
+    }).setView([INITIAL_LAT, INITIAL_LONG], INITIAL_ZOOM);
+
+    // Creamos la instancia de la capa y la añadimos al mapa
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
     }).addTo(map);
@@ -318,7 +327,7 @@ function renderGeofencesOnMapInitialState() {
  * Dibuja los marcadores de dispositivos en el mapa.
  */
 function updateDeviceMarkers() {
-    map.eachLayer(function(layer) {
+    map.eachLayer(function (layer) {
         if (layer.options && layer.options.isDeviceMarker) {
             map.removeLayer(layer);
         }

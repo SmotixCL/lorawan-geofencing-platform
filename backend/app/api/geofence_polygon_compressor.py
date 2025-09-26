@@ -35,7 +35,7 @@ DEFAULT_MAX_PAYLOAD = AU915_PAYLOAD_LIMITS['SF10']
 
 class AU915CoordinateCompressor:
     """
-    Compresor de coordenadas optimizado para región AU915 (Chile)
+    Compresor de coordenadas para región AU915 (Chile)
     Reduce payload de polígonos de ~82 bytes a ~25-35 bytes
     """
     
